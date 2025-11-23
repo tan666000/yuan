@@ -163,11 +163,19 @@ static bool dir_is_replace(const char *path)
 {
     char buf[8];
     ssize_t len = lgetxattr(path, REPLACE_DIR_XATTR, buf, sizeof(buf) - 1);
-    if (len <= 0)
-        return false;
-
-    buf[len] = '\0';
-    return (strcmp(buf, "y") == 0);
+    
+    if (len > 0) {
+        buf[len] = '\0';
+        if (strcmp(buf, "y") == 0)
+            return true;
+    }
+    
+    int dirfd = open(path, O_RDONLY | O_DIRECTORY);
+    if (dirfd < 0) return false;
+    
+    bool exists = (faccessat(dirfd, REPLACE_DIR_FILE_NAME, F_OK, 0) == 0);
+    close(dirfd);
+    return exists;
 }
 
 static Node *node_new_module(const char *name, const char *path,

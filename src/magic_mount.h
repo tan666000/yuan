@@ -9,6 +9,7 @@
 #define SKIP_MOUNT_FILE_NAME   "skip_mount"
 
 #define REPLACE_DIR_XATTR "trusted.overlay.opaque"
+#define REPLACE_DIR_FILE_NAME ".replace"
 
 #define DEFAULT_MOUNT_SOURCE  "KSU"
 #define DEFAULT_MODULE_DIR    "/data/adb/modules"
