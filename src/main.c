@@ -47,7 +47,7 @@ static void usage(const char *prog)
             "  -m, --module-dir DIR      Module directory (default: %s)\n"
             "  -t, --temp-dir DIR        Temporary directory (default: auto-detected)\n"
             "  -s, --mount-source SRC    Mount source (default: %s)\n"
-            "  -p, --partitions LIST     Extra partitions (eg. odm,mi_ext,my_stock)\n"
+            "  -p, --partitions LIST     Extra partitions (eg. mi_ext,my_stock)\n"
             "  -l, --log-file FILE       Log file (default: stderr, '-' for stdout)\n"
             "  -c, --config FILE         Config file (default: %s)\n"
             "  -v, --verbose             Enable debug logging\n"
