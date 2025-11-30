@@ -6,6 +6,7 @@ SKIPUNZIP=1
 module_id="org.zrlab.magic_mount"
 module_data_dir="/data/adb/magic_mount"
 metamodule_link="/data/adb/metamodule"
+module_shim_id="meta-mm"
 
 ui_print "- File integrity check"
 
@@ -117,8 +118,7 @@ module_dirs="
 # Copy regular module files
 for f in ${module_files}; do
     if [ ! -f "$TMPDIR/$f" ]; then
-        ui_print "  ! Warning: $f not found, skipping"
-        continue
+        abort " ! Failed: $f not found"
     fi
     
     if ! cp "$TMPDIR/$f" "$MODPATH/$f"; then
@@ -132,8 +132,7 @@ done
 # Copy executable scripts
 for f in ${executable_scripts}; do
     if [ ! -f "$TMPDIR/$f" ]; then
-        ui_print "  ! Warning: $f not found, skipping"
-        continue
+        abort " ! Failed: $f not found"
     fi
     
     if ! cp "$TMPDIR/$f" "$MODPATH/$f"; then
@@ -180,6 +179,77 @@ else
     ui_print "  ℹ Existing configuration preserved"
 fi
 
+# Detect current installation type
+ui_print "- Detecting installation type"
+
+current_modid=$(basename "$MODPATH")
+modules_dir="/data/adb/modules"
+modules_update_dir="/data/adb/modules_update"
+
+if [ "$current_modid" = "$module_shim_id" ]; then
+    ui_print "  ⚠ Shim installation detected"
+    INSTALL_TYPE="shim"
+elif [ "$current_modid" = "$module_id" ]; then
+    ui_print "  ✓ Normal installation detected"
+    INSTALL_TYPE="normal"
+else
+    ui_print "  ! Unknown installation type: $current_modid"
+    INSTALL_TYPE="unknown"
+fi
+
+# Handle shim cleanup for normal installations
+if [ "$INSTALL_TYPE" = "normal" ]; then
+    ui_print "- Checking for existing shim installation"
+    
+    shim_removed=0
+    
+    # Check and remove shim from modules directory
+    if [ -d "$modules_dir/$module_shim_id" ]; then
+        ui_print "  Found shim in modules directory"
+        
+        # Verify it's actually a shim by checking module.prop
+        if [ -f "$modules_dir/$module_shim_id/module.prop" ]; then
+            shim_real_id=$(grep "^id=" "$modules_dir/$module_shim_id/module.prop" | cut -d'=' -f2)
+            
+            if [ "$shim_real_id" = "$module_id" ]; then
+                ui_print "  Removing shim installation: $module_shim_id"
+                rm -rf "$modules_dir/$module_shim_id"
+                shim_removed=1
+            fi
+        else
+            # No valid module.prop, safe to remove
+            ui_print "  Removing invalid shim directory"
+            rm -rf "$modules_dir/$module_shim_id"
+            shim_removed=1
+        fi
+    fi
+    
+    # Check and remove shim from modules_update directory
+    if [ -d "$modules_update_dir/$module_shim_id" ]; then
+        ui_print "  Found shim in modules_update directory"
+        
+        if [ -f "$modules_update_dir/$module_shim_id/module.prop" ]; then
+            shim_real_id=$(grep "^id=" "$modules_update_dir/$module_shim_id/module.prop" | cut -d'=' -f2)
+            
+            if [ "$shim_real_id" = "$module_id" ]; then
+                ui_print "  Removing shim from updates: $module_shim_id"
+                rm -rf "$modules_update_dir/$module_shim_id"
+                shim_removed=1
+            fi
+        else
+            ui_print "  Removing invalid shim from updates"
+            rm -rf "$modules_update_dir/$module_shim_id"
+            shim_removed=1
+        fi
+    fi
+    
+    if [ $shim_removed -eq 1 ]; then
+        ui_print "  ✓ Shim cleanup completed"
+    else
+        ui_print "  ℹ No shim installation found"
+    fi
+fi
+
 ui_print "- Managing metamodule status"
 
 # Check if metamodule symlink exists and points to a different module
@@ -189,8 +259,9 @@ if [ -L "$metamodule_link" ]; then
     if [ -n "$metamodule_path" ]; then
         metamodule_id=$(basename "$metamodule_path")
         
-        if [ "$metamodule_id" != "$module_id" ]; then
-            ui_print "  Switching from $metamodule_id to $module_id"
+        # Consider both real module_id and shim_id as valid for this module
+        if [ "$metamodule_id" != "$module_id" ] && [ "$metamodule_id" != "$module_shim_id" ]; then
+            ui_print "  Switching from $metamodule_id to $current_modid"
             
             # Mark old metamodule for removal
             if [ -f "$metamodule_path/module.prop" ]; then
@@ -199,6 +270,10 @@ if [ -L "$metamodule_link" ]; then
             fi
             
             # Remove old symlink
+            rm -f "$metamodule_link"
+        elif [ "$metamodule_id" = "$module_shim_id" ] && [ "$current_modid" = "$module_id" ]; then
+            # Update link from shim to normal
+            ui_print "  Updating metamodule link from shim to normal"
             rm -f "$metamodule_link"
         else
             ui_print "  ✓ Already active metamodule"
@@ -212,22 +287,115 @@ fi
 
 # Create new metamodule symlink if needed
 if [ ! -e "$metamodule_link" ]; then
-    if ln -sf "/data/adb/modules/$module_id" "$metamodule_link"; then
+    if ln -sf "$modules_dir/$current_modid" "$metamodule_link"; then
         ui_print "  ✓ Activated as metamodule"
     else
         ui_print "  ! Warning: Failed to create metamodule link"
     fi
 fi
 
-ui_print "- Finalizing installation"
+# Shim-specific post-install setup
+if [ "$INSTALL_TYPE" = "shim" ]; then
+    ui_print "- Setting up shim migration"
+    ui_print "  Scheduling module ID migration to $module_id"
+    
+    # Create a post-install script to handle the rename
+    cat > "$MODPATH/post-fs-data.sh" << 'EOF'
+#!/system/bin/sh
+
+module_id="org.zrlab.magic_mount"
+module_shim_id="meta-mm"
+metamodule_link="/data/adb/metamodule"
+modules_dir="/data/adb/modules"
+
+# Function to safely rename module directory
+rename_module() {
+    local source_dir="$1"
+    local source_id="$2"
+    local target_id="$3"
+    
+    if [ -d "$source_dir/$source_id" ]; then
+        # Check if target already exists
+        if [ -e "$source_dir/$target_id" ]; then
+            # Target exists, check if it's valid
+            if [ -f "$source_dir/$target_id/module.prop" ]; then
+                target_real_id=$(grep "^id=" "$source_dir/$target_id/module.prop" | cut -d'=' -f2)
+                
+                if [ "$target_real_id" = "$module_id" ]; then
+                    # Valid target module exists, remove shim
+                    rm -rf "$source_dir/$source_id"
+                    return 0
+                fi
+            fi
+            
+            # Invalid target, remove it
+            rm -rf "$source_dir/$target_id"
+        fi
+        
+        # Perform rename
+        if mv "$source_dir/$source_id" "$source_dir/$target_id"; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    return 2  # Source doesn't exist
+}
+
+# Only run once
+if [ -f "$modules_dir/$module_id/.shim_migrated" ]; then
+    exit 0
+fi
+
+# Also check if we're still in shim directory
+if [ ! -d "$modules_dir/$module_shim_id" ]; then
+    exit 0
+fi
+
+# Rename in modules directory
+if rename_module "$modules_dir" "$module_shim_id" "$module_id"; then
+    # Update metamodule link if it points to shim
+    if [ -L "$metamodule_link" ]; then
+        link_target=$(readlink "$metamodule_link")
+        if [ "$link_target" = "$modules_dir/$module_shim_id" ] || \
+           [ "$(basename "$(realpath "$metamodule_link" 2>/dev/null)")" = "$module_shim_id" ]; then
+            rm -f "$metamodule_link"
+            ln -sf "$modules_dir/$module_id" "$metamodule_link"
+        fi
+    fi
+    
+    # Mark migration as complete
+    touch "$modules_dir/$module_id/.shim_migrated" 2>/dev/null
+fi
+
+# Remove this script after execution
+rm -f "$modules_dir/$module_id/post-fs-data.sh"
+
+exit 0
+EOF
+
+    chmod 755 "$MODPATH/post-fs-data.sh"
+    ui_print "  ✓ Post-install migration script created"
+    ui_print "  ℹ Module will be renamed on next boot"
+fi
 
 ui_print ""
 ui_print "========================================="
 ui_print " Magic Mount Installation Information"
 ui_print "========================================="
 ui_print " Module ID: $module_id"
+ui_print " Install Dir: $current_modid"
+if [ "$INSTALL_TYPE" = "shim" ]; then
+    ui_print " Install Type: Shim (will migrate on reboot)"
+else
+    ui_print " Install Type: Normal"
+fi
 ui_print " Architecture: $ABI"
 ui_print " Binary: $ARCH_BINARY"
 ui_print " Data directory: $module_data_dir"
 ui_print "========================================="
 ui_print ""
+
+ui_print "- Finalizing installation"
+
