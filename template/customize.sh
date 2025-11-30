@@ -8,6 +8,38 @@ module_data_dir="/data/adb/magic_mount"
 metamodule_link="/data/adb/metamodule"
 module_shim_id="meta-mm"
 
+after_shim() {
+    if [ "$INSTALL_TYPE" != "shim" ]; then
+        return 0
+    fi
+
+    local std_dir="$modules_dir/$module_id"
+    local shim_dir="$modules_dir/$module_shim_id"
+    local upd_std_dir="$modules_update_dir/$module_id"
+    local upd_shim_dir="$modules_update_dir/$module_shim_id"
+
+    if [ -d "$std_dir" ]; then
+        ui_print "  ℹ Detected existing standard installation, processing shim cleanup..."
+
+        if [ -d "$shim_dir" ]; then
+            ui_print "  - Removing existing shim directory"
+            rm -rf "$shim_dir"
+        fi
+
+        if [ -d "$upd_shim_dir" ]; then
+            ui_print "  - Migrating shim update dir to standard ID"
+            rm -rf "$upd_std_dir" 2>/dev/null
+            mv "$upd_shim_dir" "$upd_std_dir"
+        fi
+
+        touch "${std_dir}/update"
+
+        ui_print "  ✓ Shim cleanup completed"
+    fi
+}
+
+trap after_shim EXIT
+
 ui_print "- File integrity check"
 
 # Extract all files to temporary directory
@@ -296,11 +328,12 @@ fi
 
 # Shim-specific post-install setup
 if [ "$INSTALL_TYPE" = "shim" ]; then
-    ui_print "- Setting up shim migration"
-    ui_print "  Scheduling module ID migration to $module_id"
-    
-    # Create a post-install script to handle the rename
-    cat > "$MODPATH/post-fs-data.sh" << 'EOF'
+    if [ -d "$modules_dir/$module_id" ]; then
+        ui_print "  ℹ Standard module already exists; shim migration script NOT created"
+    else
+        ui_print "- Setting up shim migration"
+        # Create a post-install script to handle the rename
+        cat > "$MODPATH/post-fs-data.sh" << 'EOF'
 #!/system/bin/sh
 
 module_id="org.zrlab.magic_mount"
