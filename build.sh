@@ -10,8 +10,7 @@ NC='\033[0m'
 BASE_URL="https://magic-mount.zrlab.org/download"
 UPDATE_JSON_URL="https://magic-mount.zrlab.org/version"
 CHANGELOG_URL="https://magic-mount.zrlab.org/changelog"
-MODULE_ID="org.zrlab.magic_mount"
-SHIM_ID="meta-mm"
+MODULE_ID="meta-mm"
 
 # Build state
 BUILD_TYPES=()
@@ -19,7 +18,6 @@ VERSION=""
 VERSION_FULL=""
 GIT_COMMIT=""
 TEMP_DIRS=()
-BUILD_SHIM=false
 
 # Logging functions
 log_info() { echo -e "${GREEN}$*${NC}" >&2; }
@@ -33,7 +31,6 @@ cleanup() {
     
     log_warn "Cleaning up temporary directories..."
     
-    # Clean up other temp directories
     for dir in "${TEMP_DIRS[@]}"; do
         if [ -d "$dir" ]; then
             rm -rf "$dir"
@@ -59,23 +56,16 @@ usage() {
 Usage: $0 [OPTIONS]
 
 OPTIONS:
-    --release       Build release version
-    --debug         Build debug version
-    --shim          Build shim versions (creates both normal and shim variants)
+    --release       Build release version only
+    --debug         Build debug version only
     -h, --help      Show this help message
-    (no option)     Build both release and debug versions
-
-When --shim is combined with --release or --debug, both normal and shim 
-versions will be built, sharing binaries for efficiency.
+    (no option)     Build both versions
 
 Version is automatically obtained from git tags.
 
 EXAMPLES:
-    $0                          # Build release and debug (normal)
-    $0 --release                # Build release only (normal)
-    $0 --release --shim         # Build release normal + shim
-    $0 --debug --shim           # Build debug normal + shim
-    $0 --shim                   # Build both types, each with normal + shim
+    $0                      # Build both release and debug
+    $0 --release            # Build release only
 EOF
     exit 1
 }
@@ -84,9 +74,8 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            -r|--release) BUILD_TYPES+=("release"); shift ;;
-            -d|--debug) BUILD_TYPES+=("debug"); shift ;;
-            -s|--shim) BUILD_SHIM=true; shift ;;
+            --release) BUILD_TYPES+=("release"); shift ;;
+            --debug) BUILD_TYPES+=("debug"); shift ;;
             -h|--help) usage ;;
             *) log_error "Unknown parameter: $1"; usage ;;
         esac
@@ -200,7 +189,7 @@ EOF
 build_binaries() {
     local build_type=$1
     
-    log_step 2 9 "Building binaries ($build_type)"
+    log_step 2 8 "Building binaries ($build_type)"
     
     cd src || return 1
     make clean > /dev/null 2>&1
@@ -220,19 +209,8 @@ configure_module() {
     local build_dir=$1
     local build_type=$2
     local version_code=$3
-    local is_shim=${4:-false}  # Optional parameter, defaults to false
     
-    # Determine module ID and metamodule value based on variant type
-    local module_id_to_use="$MODULE_ID"
-    local metamodule_value="1"
-    
-    if [ "$is_shim" = true ]; then
-        module_id_to_use="$SHIM_ID"
-        metamodule_value="0"
-        log_info "  Configuring shim variant (ID: $module_id_to_use, metamodule: $metamodule_value)"
-    else
-        log_info "  Configuring normal variant (ID: $module_id_to_use, metamodule: $metamodule_value)"
-    fi
+    log_step 3 8 "Configuring module files"
     
     # Configure module.prop
     local module_prop="$build_dir/module.prop"
@@ -243,20 +221,19 @@ configure_module() {
     
     local module_version="$VERSION_FULL"
     
-    sed -i "s|^id=.*|id=$module_id_to_use|" "$module_prop"
+    sed -i "s|^id=.*|id=$MODULE_ID|" "$module_prop"
     sed -i "s|^version=.*|version=$module_version|" "$module_prop"
     sed -i "s|^versionCode=.*|versionCode=$version_code|" "$module_prop"
     sed -i "s|^updateJson=.*|updateJson=$UPDATE_JSON_URL|" "$module_prop"
-    sed -i "s|^metamodule=.*|metamodule=$metamodule_value|" "$module_prop"
     
-    log_info "  module.prop configured ($module_version, code $version_code)"
+    log_info "module.prop configured ($module_version, code $version_code)"
 }
 
 # Generate checksums for all files
 generate_checksums() {
     local build_dir=$1
     
-    log_info "  Generating checksums"
+    log_step 5 8 "Generating checksums"
     
     local checksum_file="$build_dir/checksums"
     
@@ -271,14 +248,14 @@ generate_checksums() {
     fi
     
     local count=$(wc -l < "$checksum_file")
-    log_info "  Generated checksums for $count files"
+    log_info "Generated checksums for $count files"
 }
 
 # Normalize timestamps for reproducible builds
 normalize_timestamps() {
     local build_dir=$1
     
-    log_info "  Normalizing timestamps"
+    log_step 6 8 "Normalizing timestamps for reproducible build"
     
     # Use git commit timestamp for reproducibility
     local git_timestamp=$(git log -1 --format=%ct 2>/dev/null)
@@ -295,6 +272,13 @@ normalize_timestamps() {
             log_error "Failed to convert git timestamp"
             return 1
         fi
+        
+        # Show human-readable commit time
+        local human_time=$(date -d "@$git_timestamp" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+        if [ -z "$human_time" ]; then
+            human_time=$(date -r "$git_timestamp" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+        fi
+        log_info "Using git commit time: $human_time"
     else
         timestamp=$(date '+%Y%m%d%H%M.%S')
         log_warn "Git timestamp not available, using current time"
@@ -305,190 +289,86 @@ normalize_timestamps() {
         return 1
     fi
     
-    log_info "  Timestamps normalized"
+    log_info "All timestamps normalized to: $timestamp"
 }
 
-# Package variant
-package_variant() {
-    local base_dir=$1
-    local output_name=$2
-    local is_shim=$3
-    local variant_name=$4
-    
-    log_info "  Packaging $variant_name variant"
-    
-    # Create a copy for this variant
-    local variant_dir="${base_dir}_${variant_name}"
-    if ! cp -r "$base_dir" "$variant_dir"; then
-        log_error "Failed to create variant directory"
-        return 1
-    fi
-    
-    # Determine module ID and metamodule value
-    local module_id="$MODULE_ID"
-    local metamodule_value="1"
-    
-    if [ "$is_shim" = true ]; then
-        module_id="$SHIM_ID"
-        metamodule_value="0"
-        log_info "    Configuring as shim (ID: $module_id, metamodule: $metamodule_value)"
-    fi
-    
-    # Configure for this module ID and metamodule setting
-    local module_prop="$variant_dir/module.prop"
-    sed -i "s|^id=.*|id=$module_id|" "$module_prop"
-    sed -i "s|^metamodule=.*|metamodule=$metamodule_value|" "$module_prop"
-    
-    # Regenerate checksums with the new module.prop
-    if ! (cd "$variant_dir" && \
-        find . -type f ! -name "checksums" -print0 | \
-        LC_ALL=C sort -z | \
-        xargs -0 sha256sum | \
-        sed 's|^\./||' > checksums); then
-        log_error "Failed to regenerate checksums"
-        return 1
-    fi
-    
-    # Re-normalize timestamps
-    local git_timestamp=$(git log -1 --format=%ct 2>/dev/null)
-    if [ -n "$git_timestamp" ]; then
-        local timestamp=$(date -d "@$git_timestamp" '+%Y%m%d%H%M.%S' 2>/dev/null)
-        if [ -z "$timestamp" ]; then
-            timestamp=$(date -r "$git_timestamp" '+%Y%m%d%H%M.%S' 2>/dev/null)
-        fi
-    else
-        timestamp=$(date '+%Y%m%d%H%M.%S')
-    fi
-    find "$variant_dir" -exec touch -m -t "$timestamp" {} +
-    
-    # Package
-    if ! (cd "$variant_dir" && zip -qr "../../build/$output_name" ./*); then
-        log_error "Failed to create package"
-        return 1
-    fi
-    
-    # Clean up variant directory
-    rm -rf "$variant_dir"
-    
-    local size=$(du -h "build/$output_name" | cut -f1)
-    log_info "  Created: $output_name ($size)"
-}
-
-# Build single type with variants
+# Build single type
 build_single_type() {
     local build_type=$1
-    local build_shim=$2
-    
+    local build_dir="build/${build_type}_temp"
     local version_code=$(git rev-list --count HEAD)
+    local output_name="meta-magic_mount-${VERSION_FULL}-${build_type}.zip"
     
-    # Set base directory and register for cleanup
-    BASE_DIR="build/${build_type}_base"
-    
-    # Register other directories for cleanup
-    TEMP_DIRS+=("src/bin" "$BASE_DIR")
+    # Register this temp directory for cleanup
+    TEMP_DIRS+=("$build_dir")
+    TEMP_DIRS+=("src/bin")
     
     log_info ""
     log_info "========================================"
-    if [ "$build_shim" = true ]; then
-        log_info "Building $build_type (normal + shim variants)"
-    else
-        log_info "Building $build_type (normal)"
-    fi
+    log_info "Building $build_type version"
     log_info "Version: $VERSION_FULL"
     log_info "========================================"
     
     # Clean and create build directory
-    rm -rf "$BASE_DIR"
-    mkdir -p "$BASE_DIR" || {
-        log_error "Failed to create build directory: $BASE_DIR"
+    rm -rf "$build_dir"
+    mkdir -p "$build_dir" || {
+        log_error "Failed to create build directory: $build_dir"
         return 1
     }
     
     # Step 1: Copy template
-    log_step 1 9 "Copying template"
-    if ! cp -r template/* "$BASE_DIR/"; then
+    log_step 1 8 "Copying template"
+    if ! cp -r template/* "$build_dir/"; then
         log_error "Failed to copy template"
         return 1
     fi
     
-    # Step 2: Build binaries (shared)
+    # Step 2: Build binaries
     build_binaries "$build_type" || return 1
     
-    # Step 3: Initial configuration (will be overridden per variant)
-    log_step 3 9 "Configuring base module files"
-    configure_module "$BASE_DIR" "$build_type" "$version_code" false || return 1
+    # Step 3: Configure module
+    configure_module "$build_dir" "$build_type" "$version_code" || return 1
     
-    # Step 4: Copy binaries (shared)
-    log_step 4 9 "Copying binaries"
+    # Step 4: Copy binaries
+    log_step 4 8 "Copying binaries"
     if [ ! -d "src/bin" ]; then
         log_error "src/bin not found"
         return 1
     fi
-    if ! cp -r src/bin "$BASE_DIR/"; then
+    if ! cp -r src/bin "$build_dir/"; then
         log_error "Failed to copy binaries"
         return 1
     fi
     
-    # Step 5: Generate checksums (will be regenerated per variant)
-    log_step 5 9 "Generating base checksums"
-    generate_checksums "$BASE_DIR" || return 1
+    # Step 5: Generate checksums
+    generate_checksums "$build_dir" || return 1
     
-    # Step 6: Normalize timestamps (will be reapplied per variant)
-    log_step 6 9 "Normalizing timestamps"
-    normalize_timestamps "$BASE_DIR" || return 1
+    # Step 6: Normalize timestamps
+    normalize_timestamps "$build_dir" || return 1
     
-    # Step 7: Package variants
-    log_step 7 9 "Packaging variants"
-    
-    local built_artifacts=()
-    
-    # Normal variant
-    local normal_output="meta-magic_mount-${VERSION_FULL}-${build_type}.zip"
-    if package_variant "$BASE_DIR" "$normal_output" false "normal"; then
-        built_artifacts+=("$normal_output")
-    else
-        log_error "Failed to package normal variant"
+    # Step 7: Package
+    log_step 7 8 "Creating package"
+    if ! (cd "$build_dir" && zip -qr "../../build/$output_name" ./*); then
+        log_error "Failed to create package"
         return 1
     fi
     
-    # Shim variant (if requested)
-    if [ "$build_shim" = true ]; then
-        local shim_output="meta-magic_mount-${VERSION_FULL}-${build_type}-shim.zip"
-        if package_variant "$BASE_DIR" "$shim_output" true "shim"; then
-            built_artifacts+=("$shim_output")
-        else
-            log_error "Failed to package shim variant"
-            return 1
-        fi
-    fi
-    
-    # Step 8: Generate misc files
-    log_step 8 9 "Generating metadata files"
+    # Step 8: Generate misc for release
     if [ "$build_type" = "release" ]; then
-        # Generate changelog once (shared between variants)
+        log_step 8 8 "Generating misc"
         generate_changelog
-        
-        # Generate update JSON only for normal variant
-        # Shim variant doesn't need separate version.json since it converts to normal module after installation
-        generate_update_json "$normal_output" "$version_code"
-        log_info "  Generated version.json (normal variant only)"
+        generate_update_json "$output_name" "$version_code"
     else
-        log_info "  Skipped (debug build)"
+        log_step 8 8 "Skipping misc (debug build)"
     fi
     
-    log_step 9 9 "Done. "
-    
+    local size=$(du -h "build/$output_name" | cut -f1)
     log_info ""
     log_info "========================================="
-    log_info "Build complete for $build_type:"
-    for artifact in "${built_artifacts[@]}"; do
-        local size=$(du -h "build/$artifact" | cut -f1)
-        log_info "  - $artifact ($size)"
-    done
+    log_info "Build complete: $output_name ($size)"
     log_info "========================================="
     
-    # Return artifacts via global variable
-    artifacts=("${built_artifacts[@]}")
+    artifact="$output_name"
 }
 
 # Main build process
@@ -503,12 +383,12 @@ main() {
     # Build each type
     local success=0
     local failed=0
-    local all_built_files=()
+    local built_files=()
     
     for build_type in "${BUILD_TYPES[@]}"; do
-        if build_single_type "$build_type" "$BUILD_SHIM"; then
+        if build_single_type "$build_type"; then
             ((success++))
-            all_built_files+=("${artifacts[@]}")
+            built_files+=("$artifact")
         else
             ((failed++))
             log_error "Failed to build $build_type"
@@ -522,20 +402,14 @@ main() {
     log_info "========================================"
     log_info "Version: $VERSION_FULL"
     log_info "Commit: $GIT_COMMIT"
-    log_info "Build mode: $([ "$BUILD_SHIM" = true ] && echo "NORMAL + SHIM" || echo "NORMAL ONLY")"
-    log_info "Module IDs: $MODULE_ID$([ "$BUILD_SHIM" = true ] && echo ", $SHIM_ID" || echo "")"
     log_info "Success: $success | Failed: $failed"
     log_info "----------------------------------------"
     log_info "Generated files:"
-    
-    # Show metadata files
     if [[ " ${BUILD_TYPES[*]} " =~ " release " ]]; then
         log_info "  build/changelog.md"
         log_info "  build/version.json"
     fi
-    
-    # Show all artifacts
-    for file in "${all_built_files[@]}"; do
+    for file in "${built_files[@]}"; do
         local size=$(du -h "build/$file" | cut -f1)
         log_info "  build/$file ($size)"
     done
