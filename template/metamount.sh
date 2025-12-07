@@ -9,27 +9,13 @@ MODDIR="${0%/*}"
 BINARY="$MODDIR/mmd"
 
 if [ ! -f "$BINARY" ]; then
-    log "ERROR: Binary not found: $BINARY"
+    # 只修改这里：把log改为echo输出到标准错误
+    echo "ERROR: Binary not found: $BINARY" >&2
     exit 1
-fi
-
-MM_LOG_FILE=$(busybox awk -F= '
-/^[[:space:]]*log_file[[:space:]]*=/ {
-    val=$2
-    sub(/#.*/, "", val)
-    gsub(/^[ \t"]+|[ \t"]+$/, "", val)
-    print val
-}' /data/adb/magic_mount/mm.conf)
-
-if [ -f "$MM_LOG_FILE" ]; then
-    mv "$MM_LOG_FILE" "$MM_LOG_FILE".old
 fi
 
 # Set environment variables
 export MODULE_METADATA_DIR="/data/adb/modules"
-
-log "Metadata directory: $MODULE_METADATA_DIR"
-log "Executing $BINARY"
 
 $BINARY
 
@@ -37,9 +23,6 @@ EXIT_CODE=$?
 
 if [ "$EXIT_CODE" = 0 ]; then
     /data/adb/ksud kernel notify-module-mounted
-    log "Mount completed successfully"
-else
-    log "Mount failed with exit code $EXIT_CODE"
 fi
 
 exit 0
